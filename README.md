@@ -1,1 +1,1 @@
-# n-body
+# nbody
