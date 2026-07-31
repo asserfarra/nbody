@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D N-Body Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #05050d;
+            font-family: 'Consolas', monospace;
+            color: white;
+            user-select: none;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+            text-shadow: 1px 1px 2px black;
+            font-size: 14px;
+            line-height: 1.5;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #preset-selector {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(20, 20, 35, 0.8);
+            color: white;
+            border: 1px solid #444;
+            padding: 8px;
+            font-family: monospace;
+            cursor: pointer;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+    
+    <div id="hud">
+        <div id="status-line">N-Body Viewer | Laden...</div>
+        <hr style="border-color: #333;">
+        WASD: Bewegen | Space/Ctrl: Omhoog/Omlaag | Shift: Boost<br>
+        Klik op het scherm + Muis: Rondkijken | P: Pauze | R: Reset Camera
+    </div>
+
+    <select id="preset-selector">
+        <option value="random">Preset: Random (30 bodies)</option>
+        <option value="figure8">Preset: Figure Eight</option>
+        <option value="solar">Preset: Solar System</option>
+    </select>
+
+    <script>
+        // --- 1. NATUURKUNDIGE ENGINE (N-Body) ---
+        class NBodySimulation {
+            constructor(masses, positions, velocities, G = 1.0, softening = 0.2) {
+                this.n = masses.length;
+                this.masses = new Float32Array(masses);
+                // Opgeslagen als platte arrays [x1,y1,z1, x2,y2,z2, ...]
+                this.positions = new Float32Array(positions.flat());
+                this.velocities = new Float32Array(velocities.flat());
+                this.G = G;
+                this.softeningSq = softening * softening;
+                this.accelerations = new Float32Array(this.n * 3);
+            }
+
+            computeAccelerations() {
+                this.accelerations.fill(0);
+
+                for (let i = 0; i < this.n; i++) {
+                    const idxI = i * 3;
+                    const xi = this.positions[idxI];
+                    const yi = this.positions[idxI + 1];
+                    const zi = this.positions[idxI + 2];
+
+                    for (let j = i + 1; j < this.n; j++) {
+                        const idxJ = j * 3;
+                        const dx = this.positions[idxJ] - xi;
+                        const dy = this.positions[idxJ + 1] - yi;
+                        const dz = this.positions[idxJ + 2] - zi;
+
+                        const distSq = dx*dx + dy*dy + dz*dz + this.softeningSq;
+                        const invDist3 = 1.0 / Math.sqrt(distSq * distSq * distSq);
+
+                        // Kracht van j op i
+                        const fI = this.G * this.masses[j] * invDist3;
+                        this.accelerations[idxI]     += dx * fI;
+                        this.accelerations[idxI + 1] += dy * fI;
+                        this.accelerations[idxI + 2] += dz * fI;
+
+                        // Kracht van i op j (Actie = -Reactie)
+                        const fJ = this.G * this.masses[i] * invDist3;
+                        this.accelerations[idxJ]     -= dx * fJ;
+                        this.accelerations[idxJ + 1] -= dy * fJ;
+                        this.accelerations[idxJ + 2] -= dz * fJ;
+                    }
+                }
+            }
+
+            step(dt) {
+                // Leapfrog integratie (Kick-Drift-Kick)
+                this.computeAccelerations();
+                for (let i = 0; i < this.n * 3; i++) {
+                    this.velocities[i] += 0.5 * this.accelerations[i] * dt;
+                    this.positions[i] += this.velocities[i] * dt;
+                }
+                
+                this.computeAccelerations();
+                for (let i = 0; i < this.n * 3; i++) {
+                    this.velocities[i] += 0.5 * this.accelerations[i] * dt;
+                }
+            }
+        }
+
+        // --- 2. PRESETS ---
+        function getPreset(name) {
+            if (name === 'figure8') {
+                const v = [0.466203685, 0.43236573, 0.0];
+                return {
+                    masses: [1.0, 1.0, 1.0],
+                    positions: [[0.9700436, -0.24308753, 0.0], [-0.9700436, 0.24308753, 0.0], [0.0, 0.0, 0.0]],
+                    velocities: [v, v, [-2 * v[0], -2 * v[1], 0.0]],
+                    dt: 0.003, substeps: 6, trailLength: 500
+                };
+            } else if (name === 'solar') {
+                const cv = (r) => Math.sqrt(1000.0 / r);
+                return {
+                    masses: [1000.0, 1.0, 1.5, 2.0, 0.5],
+                    positions: [[0,0,0], [8,0,0], [0,13,0.5], [-18,0,-0.3], [0,-25,0.8]],
+                    velocities: [[0,0,0], [0,cv(8),0], [-cv(13),0,0], [0,-cv(18),0], [cv(25),0,0]],
+                    dt: 0.004, substeps: 8, trailLength: 400
+                };
+            } else { // random
+                const n = 30;
+                const masses = [], positions = [], velocities = [];
+                let sumV = [0, 0, 0], sumM = 0;
+
+                for(let i=0; i<n; i++) {
+                    const m = Math.random() * 2.5 + 0.5;
+                    masses.push(m);
+                    positions.push([(Math.random()-0.5)*12, (Math.random()-0.5)*12, (Math.random()-0.5)*12]);
+                    
+                    // Willekeurige snelheid (Box-Muller transform voor normaalverdeling)
+                    const v = [(Math.random()-0.5)*0.6, (Math.random()-0.5)*0.6, (Math.random()-0.5)*0.6];
+                    velocities.push(v);
+                    sumV[0] += v[0] * m; sumV[1] += v[1] * m; sumV[2] += v[2] * m;
+                    sumM += m;
+                }
+                // Momentum corrigeren zodat het middelpunt stilstaat
+                for(let i=0; i<n; i++) {
+                    velocities[i][0] -= sumV[0] / sumM;
+                    velocities[i][1] -= sumV[1] / sumM;
+                    velocities[i][2] -= sumV[2] / sumM;
+                }
+                return { masses, positions, velocities, dt: 0.01, substeps: 4, trailLength: 200 };
+            }
+        }
+
+        // --- 3. INITIALISATIE & THREE.JS SETUP ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x020205);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(renderer.domElement);
+
+        // Grid toevoegen
+        const gridHelper = new THREE.GridHelper(60, 15, 0x2e2e40, 0x2e2e40);
+        scene.add(gridHelper);
+
+        // Variabelen voor de simulatie-status
+        let sim, config;
+        let spheres = [], trails = [], trailGeometries = [], trailData = [];
+        let paused = false;
+
+        function loadPreset(name) {
+            // Oude objecten opruimen
+            spheres.forEach(s => scene.remove(s));
+            trails.forEach(t => scene.remove(t));
+            spheres = []; trails = []; trailGeometries = []; trailData = [];
+
+            config = getPreset(name);
+            sim = new NBodySimulation(config.masses, config.positions, config.velocities);
+
+            // Bepaal schaal voor camera reset
+            let maxDist = 15;
+            
+            // Aanmaken 3D bollen en trails
+            for (let i = 0; i < sim.n; i++) {
+                // Kleur genereren op basis van HSV
+                const color = new THREE.Color().setHSL(i / sim.n, 0.75, 0.6);
+
+                // Bol
+                const radius = 0.25 * Math.cbrt(sim.masses[i]);
+                const geometry = new THREE.SphereGeometry(radius, 16, 16);
+                const material = new THREE.MeshBasicMaterial({ color: color });
+                const sphere = new THREE.Mesh(geometry, material);
+                scene.add(sphere);
+                spheres.push(sphere);
+
+                // Trail (Line)
+                const trailGeom = new THREE.BufferGeometry();
+                const positions = new Float32Array(config.trailLength * 3);
+                trailGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                
+                // Transparante fade-out voor de trail
+                const trailMat = new THREE.LineBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 0.6,
+                    blending: THREE.AdditiveBlending
+                });
+                const trail = new THREE.Line(trailGeom, trailMat);
+                scene.add(trail);
+                
+                trails.push(trail);
+                trailGeometries.push(trailGeom);
+                trailData.push([]); // Houdt historische punten bij
+            }
+
+            resetCamera();
+        }
+
+        // --- 4. BESTURING (Camera & Toetsenbord) ---
+        const keys = {};
+        let mouseLocked = false;
+        let yaw = -90, pitch = -15;
+        let moveSpeed = 12;
+
+        // Pointer Lock (Muis vastzetten voor rondkijken)
+        container.addEventListener('click', () => {
+            container.requestPointerLock();
+        });
+        document.addEventListener('pointerlockchange', () => {
+            mouseLocked = document.pointerLockElement === container;
+        });
+
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.key.toLowerCase() === 'p') paused = !paused;
+            if (e.key.toLowerCase() === 'r') resetCamera();
+        });
+        document.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+        
+        document.addEventListener('mousemove', (e) => {
+            if (!mouseLocked) return;
+            const sensitivity = 0.12;
+            yaw += e.movementX * sensitivity;
+            pitch -= e.movementY * sensitivity;
+            pitch = Math.max(-89, Math.min(89, pitch));
+        });
+
+        window.addEventListener('wheel', (e) => {
+            moveSpeed = Math.max(1.0, moveSpeed - Math.sign(e.deltaY) * 2.0);
+        });
+
+        function resetCamera() {
+            let maxPos = 5;
+            for(let i=0; i<sim.positions.length; i++) maxPos = Math.max(maxPos, Math.abs(sim.positions[i]));
+            camera.position.set(0, maxPos * 0.5, maxPos * 2.0);
+            yaw = -90; pitch = -15;
+        }
+
+        function updateCamera(dt) {
+            // Bereken front/right vectoren op basis van yaw en pitch
+            const yawRad = THREE.MathUtils.degToRad(yaw);
+            const pitchRad = THREE.MathUtils.degToRad(pitch);
+
+            const front = new THREE.Vector3(
+                Math.cos(yawRad) * Math.cos(pitchRad),
+                Math.sin(pitchRad),
+                Math.sin(yawRad) * Math.cos(pitchRad)
+            ).normalize();
+
+            const up = new THREE.Vector3(0, 1, 0);
+            const right = new THREE.Vector3().crossVectors(front, up).normalize();
+
+            const actualSpeed = moveSpeed * (keys['shift'] ? 3.0 : 1.0) * dt;
+
+            if (keys['w']) camera.position.addScaledVector(front, actualSpeed);
+            if (keys['s']) camera.position.addScaledVector(front, -actualSpeed);
+            if (keys['a']) camera.position.addScaledVector(right, -actualSpeed);
+            if (keys['d']) camera.position.addScaledVector(right, actualSpeed);
+            if (keys[' ']) camera.position.y += actualSpeed; // Space
+            if (keys['control']) camera.position.y -= actualSpeed;
+
+            const target = new THREE.Vector3().addVectors(camera.position, front);
+            camera.lookAt(target);
+        }
+
+        // --- 5. MAIN LOOP ---
+        let lastTime = performance.now();
+        const fpsElement = document.getElementById('status-line');
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const now = performance.now();
+            const dtFrame = (now - lastTime) / 1000;
+            lastTime = now;
+
+            updateCamera(dtFrame);
+
+            if (!paused) {
+                // Physics stappen uitvoeren
+                for (let step = 0; step < config.substeps; step++) {
+                    sim.step(config.dt);
+                }
+
+                // Update 3D posities & Trails
+                for (let i = 0; i < sim.n; i++) {
+                    const idx = i * 3;
+                    const x = sim.positions[idx];
+                    const y = sim.positions[idx+1];
+                    const z = sim.positions[idx+2];
+
+                    spheres[i].position.set(x, y, z);
+
+                    // Geschiedenis bijhouden voor trail
+                    const history = trailData[i];
+                    history.push(x, y, z);
+                    if (history.length / 3 > config.trailLength) {
+                        history.shift(); history.shift(); history.shift();
+                    }
+
+                    // BufferGeometry updaten
+                    const geo = trailGeometries[i];
+                    const posAttr = geo.attributes.position;
+                    
+                    // Vul de WebGL buffer met de posities
+                    for (let j = 0; j < history.length / 3; j++) {
+                        posAttr.setXYZ(j, history[j*3], history[j*3+1], history[j*3+2]);
+                    }
+                    // Zorg dat de rest van de ongebruikte lijn op het nieuwste punt staat
+                    for (let j = history.length / 3; j < config.trailLength; j++) {
+                        posAttr.setXYZ(j, x, y, z);
+                    }
+                    posAttr.needsUpdate = true;
+                    geo.setDrawRange(0, history.length / 3);
+                }
+            }
+
+            renderer.render(scene, camera);
+
+            // HUD updaten
+            const status = paused ? "GEPAUZEERD" : `actief (x${config.substeps} substeps)`;
+            fpsElement.innerText = `N-Body Viewer | Deeltjes: ${sim.n} | Status: ${status} | FPS: ${(1/dtFrame).toFixed(0)} | Snelheid: ${moveSpeed.toFixed(0)}`;
+        }
+
+        // --- 6. EVENTS & START ---
+        document.getElementById('preset-selector').addEventListener('change', (e) => {
+            loadPreset(e.target.value);
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Eerste keer laden
+        loadPreset('random');
+        animate();
+    </script>
+</body>
+</html>
